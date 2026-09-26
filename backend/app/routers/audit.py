@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas import ActionResult, EntryPayload, PageResult
-from app.services.audit import AuditService
+from app.services.audit import MAX_PAGE_SIZE, AuditService
 
 router = APIRouter(prefix="/api/audit", tags=["内审管理"])
 
@@ -16,18 +16,50 @@ LIST_FIELDS = ["内审编号", "审核范围", "审核组长", "审核日期", "
 STATUSES = ["计划中", "执行中", "已完成", "跟踪中"]
 
 
+def _check_pagination(page: int, size: int) -> None:
+    """分页参数统一在这里把关：页码从 1 开始，单页最多 MAX_PAGE_SIZE 条。"""
+    if page < 1:
+        raise HTTPException(status_code=400, detail="页码从 1 开始，请调整分页参数")
+    if size < 1:
+        raise HTTPException(status_code=400, detail="每页条数至少为 1，请调整分页参数")
+    if size > MAX_PAGE_SIZE:
+        raise HTTPException(status_code=400, detail=f"每页最多 {MAX_PAGE_SIZE} 条，请缩小分页范围")
+
+
 @router.get("", response_model=PageResult[dict])
 def list_entries(
     keyword: str | None = Query(default=None, description="按内审编号检索"),
+    scope: str | None = Query(default=None, description="按审核范围检索"),
+    leader: str | None = Query(default=None, description="按审核组长检索"),
     status: str | None = Query(default=None, description="计划中、执行中、已完成、跟踪中"),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
-    """按内审编号与状态过滤内审管理列表；没有数据时返回空页，不报错。"""
-    if size > 200:
-        raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    """按条件过滤内审管理列表；没有数据时返回空页，不报错。"""
+    _check_pagination(page, size)
+    items, total = service.list_entries(
+        keyword=keyword, scope=scope, leader=leader, status=status, page=page, size=size
+    )
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+# 注意：/stats 与 /export 必须注册在 /{entry_id} 之前，否则会被当成 entry_id 抢走。
+@router.get("/stats")
+def stats() -> dict[str, Any]:
+    """数量指标：总数与按状态统计，供首页卡片与列表页头部同步展示。"""
+    return service.stats()
+
+
+@router.get("/export")
+def export_entries(
+    keyword: str | None = Query(default=None, description="按内审编号检索"),
+    scope: str | None = Query(default=None, description="按审核范围检索"),
+    leader: str | None = Query(default=None, description="按审核组长检索"),
+    status: str | None = Query(default=None, description="计划中、执行中、已完成、跟踪中"),
+) -> dict[str, Any]:
+    """导出内审管理清单：返回当前过滤条件下的全量数据，不受单页上限截断。"""
+    items, total = service.export_entries(keyword=keyword, scope=scope, leader=leader, status=status)
+    return {"module": "audit", "total": total, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -56,10 +88,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出内审管理清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "audit", "total": total, "items": items}
